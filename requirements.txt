@@ -1,0 +1,6 @@
+requests
+tzdata
+pandas
+numpy
+matplotlib
+pytz

@@ -1,0 +1,8 @@
+services:
+  my-python-app:
+    build: .
+    volumes:
+      - .:/app
+    # Nếu bạn muốn chạy container liên tục ngay cả khi script kết thúc, bạn có thể sử dụng
+    # command: tail -f /dev/null
+    # Nhưng với một script chạy một lần, command mặc định trong Dockerfile là đủ.

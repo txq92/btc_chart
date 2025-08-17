@@ -22,6 +22,7 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "3m"
 LIMIT = 120                               # <-- CHỈ LẤY 120 NẾN
 SAVE_PRICE_PNG = "btc_3m_price.png"
+SAVE_PRICE_15M_PNG = "btc_15m_price.png"
 SAVE_RSI_PNG   = "btc_3m_rsi.png"
 SAVE_MACD_PNG  = "btc_3m_macd.png"
 BASE = "https://api.binance.com"
@@ -86,6 +87,10 @@ def get_klines(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT) -> pd.DataFrame:
     df["open_time"]  = pd.to_datetime(df["open_time"], unit="ms", utc=True).dt.tz_convert(TZ)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True).dt.tz_convert(TZ)
     return df[["open_time","open","high","low","close","volume","close_time"]]
+
+# Lấy dữ liệu 15 phút
+def get_klines_15m(symbol=SYMBOL, limit=120) -> pd.DataFrame:
+    return get_klines(symbol=symbol, interval="15m", limit=limit)
 
 # ================= Trend Score =================
 def score_trend(df: pd.DataFrame) -> dict:
@@ -232,7 +237,7 @@ def collect_reversal_signals(df: pd.DataFrame) -> List[Dict]:
     return sorted(sig, key=lambda s: s["at"])
 
 # ================= Plotting (+ markers) =================
-def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str):
+def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str, interval: str = "3m"):
     plt.figure()
     plt.plot(df["open_time"], df["close"], linewidth=1.3, label="Close")
     plt.plot(df["open_time"], df["ema50"], linewidth=1.0, label="EMA50")
@@ -269,9 +274,9 @@ def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str):
                 plt.scatter([xs[-1]],[ys[-1]], marker=m, s=60)
                 plt.annotate("Div", (xs[-1],ys[-1]), xytext=(6,10), textcoords="offset points", fontsize=8)
 
-    plt.title(f"{SYMBOL} – 3m Price with EMA50/EMA100 (+Signals)")
+    plt.title(f"{SYMBOL} – {interval} Price with EMA50/EMA100 (+Signals)")
     plt.xlabel("Time (Asia/Ho_Chi_Minh)"); plt.ylabel("Price")
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=TZ))
     plt.legend(); plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
 
 def plot_rsi(df: pd.DataFrame, signals: List[Dict], save_path: str):
@@ -291,7 +296,7 @@ def plot_rsi(df: pd.DataFrame, signals: List[Dict], save_path: str):
                 plt.annotate("Div", (xs[-1],ys[-1]), xytext=(6,10), textcoords="offset points", fontsize=8)
     plt.title("RSI(14) + Divergence")
     plt.xlabel("Time (Asia/Ho_Chi_Minh)"); plt.ylabel("RSI")
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=TZ))
     plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
 
 def plot_macd(df: pd.DataFrame, signals: List[Dict], save_path: str):
@@ -309,7 +314,7 @@ def plot_macd(df: pd.DataFrame, signals: List[Dict], save_path: str):
             plt.annotate("MACD x", (t,y), xytext=(6,10), textcoords="offset points", fontsize=8)
     plt.title("MACD(12,26,9)")
     plt.xlabel("Time (Asia/Ho_Chi_Minh)"); plt.ylabel("Value")
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=TZ))
     plt.legend(); plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
 
 def send_telegram_message(text: str):
@@ -347,6 +352,7 @@ def main():
     last_signal_id = None  # Lưu id tín hiệu đảo chiều cuối cùng đã gửi
     while True:
         try:
+            # 3m chart
             df = get_klines()
             df["ema50"]  = ema(df["close"], 50)
             df["ema100"] = ema(df["close"], 100)
@@ -358,9 +364,22 @@ def main():
             dfp = df.tail(120).copy()
             result  = score_trend(dfp)
             signals = collect_reversal_signals(dfp)
-            plot_price(dfp, signals, SAVE_PRICE_PNG)
+            plot_price(dfp, signals, SAVE_PRICE_PNG, interval="3m")
             plot_rsi(dfp, signals, SAVE_RSI_PNG)
             plot_macd(dfp, signals, SAVE_MACD_PNG)
+
+            # 15m chart
+            df15 = get_klines_15m()
+            df15["ema50"]  = ema(df15["close"], 50)
+            df15["ema100"] = ema(df15["close"], 100)
+            df15["rsi"]    = rsi(df15["close"], 14)
+            macd_line15, macd_signal15, macd_hist15 = macd(df15["close"], 12, 26, 9)
+            df15["macd_line"] = macd_line15; df15["macd_signal"] = macd_signal15; df15["macd_hist"] = macd_hist15
+            df15["vol_ma20"] = df15["volume"].rolling(20).mean()
+            df15 = swing_points(df15, window=3)
+            dfp15 = df15.tail(120).copy()
+            signals15 = collect_reversal_signals(dfp15)
+            plot_price(dfp15, signals15, SAVE_PRICE_15M_PNG, interval="15m")
 
             print("=== BTC 3m Trend Detector ===")
             print(f"Time: {result['last_time'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -380,6 +399,32 @@ def main():
                 latest = signals[-1]
                 # Xác định id duy nhất cho tín hiệu đảo chiều (dựa trên type, side, at)
                 signal_id = f"{latest['type']}_{latest['side']}_{latest['at']}"
+
+                # Tính gợi ý SL/TP cho MACD Cross và RSI Divergence (dựa trên swing + EMA50/100)
+                sl_tp_text = ""
+                if latest['type'] in ("MACD Cross", "RSI Divergence"):
+                    try:
+                        h_idx, l_idx = last_two_swing_idx(dfp)
+                        ema50 = float(result.get('ema50', 0.0))
+                        ema100 = float(result.get('ema100', 0.0))
+                        if latest['side'] == 'bullish':
+                            sl = float(dfp.loc[l_idx[-1], 'low']) if l_idx else None
+                            tp_candidates = [v for v in (ema50, ema100) if v and v > 0]
+                            if h_idx:
+                                tp_candidates.append(float(dfp.loc[h_idx[-1], 'high']))
+                            tp = max(tp_candidates) if tp_candidates else None
+                        else:
+                            sl = float(dfp.loc[h_idx[-1], 'high']) if h_idx else None
+                            tp_candidates = [v for v in (ema50, ema100) if v and v > 0]
+                            if l_idx:
+                                tp_candidates.append(float(dfp.loc[l_idx[-1], 'low']))
+                            tp = min(tp_candidates) if tp_candidates else None
+                        sl_text = f"{sl:.2f}" if sl is not None else "N/A"
+                        tp_text = f"{tp:.2f}" if tp is not None else "N/A"
+                        sl_tp_text = f"\n<b>SL/TP:</b> SL: {sl_text} | TP: {tp_text}"
+                    except Exception:
+                        sl_tp_text = ""
+
                 if signal_id != last_signal_id:
                     if result['label'] == "UPTREND":
                         trend_action = "LONG"
@@ -395,10 +440,15 @@ def main():
                         f"Note: {latest.get('note','')}\n"
                         f"Close: {result['last_close']:.2f} | EMA50: {result['ema50']:.2f} | EMA100: {result['ema100']:.2f}\n"
                         f"RSI: {result['rsi']:.2f} | MACD: {result['macd_line']:.4f}\n"
-                        f"<b>Kết luận: {trend_action}</b>"
+                        f"<b>Kết luận: {trend_action}</b>" + sl_tp_text
                     )
                     send_telegram_message(msg)
-                    send_telegram_photo(SAVE_PRICE_PNG, caption="BTC 3m Price Chart")
+                    # gửi cả ảnh 3m và 15m để tham khảo
+                    send_telegram_photo(SAVE_PRICE_PNG)
+                    try:
+                        send_telegram_photo(SAVE_PRICE_15M_PNG)
+                    except Exception:
+                        pass
                     last_signal_id = signal_id
             # Chờ 60 giây trước khi lặp lại
             time.sleep(60)
@@ -406,6 +456,8 @@ def main():
             print(f"Error: {e}")
             time.sleep(60)
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()
 

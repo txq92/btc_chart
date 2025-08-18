@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTC 3m Trend Detector (Binance) — Completed
-- Lấy klines 3 phút (120 nến) + 15 phút (120 nến)
+BTC 3m Trend Detector (Binance)
+- Lấy klines 3 phút (120 nến)
 - Tính EMA50, EMA100, RSI(14), MACD(12,26,9), VolumeMA(20)
 - Nhận diện swing High/Low -> HH/HL hoặc LH/LL
-- Chấm điểm & kết luận xu hướng (3m + 15m)
+- Chấm điểm & kết luận xu hướng
 - Phát hiện tín hiệu đảo chiều: BOS, RSI Divergence, Engulfing, EMA/MACD cross
 - Vẽ & lưu hình PNG + GẮN MARKER TÍN HIỆU
-- TÍNH SL/TP (theo swing gần nhất) + R:R
-- Chống gửi trùng tín hiệu, tùy chọn confirm MTF (15m)
 """
 
-import os, re, requests, numpy as np, pandas as pd
+import re, requests, numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import datetime as dt
@@ -20,10 +18,9 @@ import pytz
 import time
 from typing import Tuple, List, Dict, Optional
 
-# ============== CONFIG ==============
 SYMBOL = "BTCUSDT"
 INTERVAL = "3m"
-LIMIT = 120
+LIMIT = 120                               # <-- CHỈ LẤY 120 NẾN
 SAVE_PRICE_PNG = "btc_3m_price.png"
 SAVE_PRICE_15M_PNG = "btc_15m_price.png"
 SAVE_RSI_PNG   = "btc_3m_rsi.png"
@@ -31,16 +28,10 @@ SAVE_MACD_PNG  = "btc_3m_macd.png"
 BASE = "https://api.binance.com"
 TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
-
 TELEGRAM_BOT_TOKEN = "8226246719:AAHXDggFiFYpsgcq1vwTAWv7Gsz1URP4KEU"
 #TELEGRAM_CHAT_ID = "-4706073326"
 TELEGRAM_CHAT_ID = "-4967023521"
 
-# Tham số vận hành
-LOOP_SLEEP_SECONDS = 15         # nghỉ giữa mỗi vòng lặp
-SEND_IMAGES = True              # gửi ảnh kèm tín hiệu
-MTF_CONFIRM = True              # confirm theo trend 15m
-MIN_RR_TO_SEND = 1.0            # chỉ gửi khi R:R >= ngưỡng (có thể đặt 1.2/1.5 tùy khẩu vị)
 
 # ================= Indicators =================
 def ema(series: pd.Series, length: int) -> pd.Series:
@@ -97,6 +88,7 @@ def get_klines(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT) -> pd.DataFrame:
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True).dt.tz_convert(TZ)
     return df[["open_time","open","high","low","close","volume","close_time"]]
 
+# Lấy dữ liệu 15 phút
 def get_klines_15m(symbol=SYMBOL, limit=120) -> pd.DataFrame:
     return get_klines(symbol=symbol, interval="15m", limit=limit)
 
@@ -139,13 +131,11 @@ def score_trend(df: pd.DataFrame) -> dict:
     else:
         label = "SIDEWAYS / MIXED"
 
-    return {
-        "score":score, "label":label, "last_time":last["open_time"],
-        "last_close":last["close"], "ema50":last["ema50"], "ema100":last["ema100"],
-        "rsi":last["rsi"], "macd_line":last["macd_line"],
-        "macd_signal":last["macd_signal"], "macd_hist":last["macd_hist"],
-        "volume":last["volume"], "vol_ma20":last["vol_ma20"], "reasons":reasons
-    }
+    return {"score":score,"label":label,"last_time":last["open_time"],
+            "last_close":last["close"],"ema50":last["ema50"],"ema100":last["ema100"],
+            "rsi":last["rsi"],"macd_line":last["macd_line"],
+            "macd_signal":last["macd_signal"],"macd_hist":last["macd_hist"],
+            "volume":last["volume"],"vol_ma20":last["vol_ma20"]}
 
 # ================= Reversal Signals =================
 def detect_bos(df: pd.DataFrame) -> List[Dict]:
@@ -213,6 +203,7 @@ def detect_engulfing(df: pd.DataFrame, lookback: int = 10) -> List[Dict]:
     return sig
 
 def detect_ema_cross(df: pd.DataFrame, within:int=20)->List[Dict]:
+    """Golden/Death cross (EMA50/EMA100) trong within nến gần nhất."""
     sig=[]; e50=df["ema50"].values; e100=df["ema100"].values
     n=len(df); start=max(1,n-within)
     for i in range(start,n):
@@ -274,6 +265,7 @@ def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str, interval: 
             plt.scatter([t],[y], marker=marker, s=60)
             plt.annotate(f"BOS {s['side']}", (t,y), xytext=(6,10), textcoords="offset points", fontsize=8)
         elif s["type"]=="RSI Divergence":
+            # nối 2 điểm giá
             pts = s.get("price_pts")
             if pts and len(pts)==2:
                 xs=[pts[0][0], pts[1][0]]; ys=[pts[0][1], pts[1][1]]
@@ -292,6 +284,7 @@ def plot_rsi(df: pd.DataFrame, signals: List[Dict], save_path: str):
     plt.plot(df["open_time"], df["rsi"], linewidth=1.2)
     plt.axhline(45, linestyle="--", linewidth=0.8)
     plt.axhline(55, linestyle="--", linewidth=0.8)
+    # Vẽ đường phân kỳ trên RSI
     for s in signals:
         if s["type"]=="RSI Divergence":
             pts = s.get("rsi_pts")
@@ -312,6 +305,7 @@ def plot_macd(df: pd.DataFrame, signals: List[Dict], save_path: str):
     plt.plot(df["open_time"], df["macd_signal"], linewidth=1.0, label="Signal")
     plt.plot(df["open_time"], df["macd_hist"], linewidth=0.8, label="Hist")
     plt.axhline(0, linewidth=0.8)
+    # đánh dấu MACD cross
     for s in signals:
         if s["type"]=="MACD Cross":
             t = s["at"]; y = float(df.loc[df["open_time"]<=t].tail(1)["macd_line"])
@@ -323,11 +317,8 @@ def plot_macd(df: pd.DataFrame, signals: List[Dict], save_path: str):
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=TZ))
     plt.legend(); plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
 
-# ================= Messaging =================
 def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN" in TELEGRAM_BOT_TOKEN:
-        print("[WARN] Chưa cấu hình TELEGRAM_BOT_TOKEN.")
-        return
+    """Gửi tin nhắn đến Telegram chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -341,8 +332,7 @@ def send_telegram_message(text: str):
         print(f"Telegram send error: {e}")
 
 def send_telegram_photo(photo_path: str, caption: str = ""):
-    if not TELEGRAM_BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN" in TELEGRAM_BOT_TOKEN:
-        return
+    """Gửi hình ảnh đến Telegram chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(photo_path, "rb") as photo:
@@ -357,50 +347,12 @@ def send_telegram_photo(photo_path: str, caption: str = ""):
     except Exception as e:
         print(f"Telegram photo send error: {e}")
 
-# ================= SL/TP & Helpers =================
-def compute_sl_tp(dfp: pd.DataFrame, side: str):
-    """SL/TP cơ bản dựa trên swing gần nhất (TP1 = swing đối diện)."""
-    h_idx, l_idx = last_two_swing_idx(dfp)
-    entry = float(dfp.iloc[-1]["close"])
-
-    sl = tp = None
-    if side == "bullish":
-        if l_idx: sl = float(dfp.loc[l_idx[-1], "low"])
-        if h_idx: tp = float(dfp.loc[h_idx[-1], "high"])
-    else:
-        if h_idx: sl = float(dfp.loc[h_idx[-1], "high"])
-        if l_idx: tp = float(dfp.loc[l_idx[-1], "low"])
-
-    rr = None
-    if sl is not None and tp is not None:
-        if side == "bullish" and entry > sl:
-            denom = (entry - sl)
-            rr = (tp - entry) / denom if denom > 0 else None
-        elif side == "bearish" and sl > entry:
-            denom = (sl - entry)
-            rr = (entry - tp) / denom if denom > 0 else None
-
-    return entry, sl, tp, rr
-
-def aligned_with_15m(side: str, label15: str) -> Tuple[bool, str]:
-    """Xác định độ đồng pha với khung 15m; trả kèm tag mô tả."""
-    if label15 == "UPTREND" and side == "bullish":
-        return True, "WITH 15m trend"
-    if label15 == "DOWNTREND" and side == "bearish":
-        return True, "WITH 15m trend"
-    if label15 == "SIDEWAYS / MIXED":
-        return True, "15m SIDEWAYS"
-    return False, "COUNTER-TREND 15m"
-
-def fmt(n: Optional[float], digits=2) -> str:
-    return "—" if n is None else f"{n:.{digits}f}"
-
 # ================= Main =================
 def main():
-    last_signal_id = None  # để chống gửi trùng
+    last_signal_id = None  # Lưu id tín hiệu đảo chiều cuối cùng đã gửi
     while True:
         try:
-            # ===== 3m =====
+            # 3m chart
             df = get_klines()
             df["ema50"]  = ema(df["close"], 50)
             df["ema100"] = ema(df["close"], 100)
@@ -410,15 +362,13 @@ def main():
             df["vol_ma20"] = df["volume"].rolling(20).mean()
             df = swing_points(df, window=3)
             dfp = df.tail(120).copy()
-
-            result3 = score_trend(dfp)
+            result  = score_trend(dfp)
             signals = collect_reversal_signals(dfp)
-
             plot_price(dfp, signals, SAVE_PRICE_PNG, interval="3m")
             plot_rsi(dfp, signals, SAVE_RSI_PNG)
             plot_macd(dfp, signals, SAVE_MACD_PNG)
 
-            # ===== 15m =====
+            # 15m chart
             df15 = get_klines_15m()
             df15["ema50"]  = ema(df15["close"], 50)
             df15["ema100"] = ema(df15["close"], 100)
@@ -428,24 +378,18 @@ def main():
             df15["vol_ma20"] = df15["volume"].rolling(20).mean()
             df15 = swing_points(df15, window=3)
             dfp15 = df15.tail(120).copy()
-            result15 = score_trend(dfp15)
-
-            # ===== Console log =====
-            print("=== BTC Trend Detector ===")
-            print(f"Time: {result3['last_time'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            print(f"3m Close: {result3['last_close']:.2f} | EMA50: {result3['ema50']:.2f} | EMA100: {result3['ema100']:.2f}")
-            print(f"3m RSI(14): {result3['rsi']:.2f}")
-            print(f"3m MACD: line {result3['macd_line']:.4f} | signal {result3['macd_signal']:.4f} | hist {result3['macd_hist']:.4f}")
-            print(f"3m Volume: {result3['volume']:.0f} | VolMA20: {result3['vol_ma20']:.0f}")
-            print(f"3m Score: {result3['score']}  =>  Trend: {result3['label']}")
-            print(f"15m Trend: {result15['label']}")
-            print(f"Saved: {SAVE_PRICE_PNG}, {SAVE_RSI_PNG}, {SAVE_MACD_PNG}, {SAVE_PRICE_15M_PNG}\n")
-
-            # Vẽ 15m cuối cùng sau khi có result15
             signals15 = collect_reversal_signals(dfp15)
             plot_price(dfp15, signals15, SAVE_PRICE_15M_PNG, interval="15m")
 
-            # ===== Xử lý tín hiệu đảo chiều mới nhất =====
+            print("=== BTC 3m Trend Detector ===")
+            print(f"Time: {result['last_time'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"Close: {result['last_close']:.2f} | EMA50: {result['ema50']:.2f} | EMA100: {result['ema100']:.2f}")
+            print(f"RSI(14): {result['rsi']:.2f}")
+            print(f"MACD: line {result['macd_line']:.4f} | signal {result['macd_signal']:.4f} | hist {result['macd_hist']:.4f}")
+            print(f"Volume: {result['volume']:.0f} | VolMA20: {result['vol_ma20']:.0f}")
+            print(f"Score: {result['score']}  =>  Trend: {result['label']}")
+            print(f"Saved: {SAVE_PRICE_PNG}, {SAVE_RSI_PNG}, {SAVE_MACD_PNG}\n")
+
             print("--- Reversal signals (latest) ---")
             if not signals:
                 print("No strong signals in recent window.")
@@ -453,64 +397,74 @@ def main():
                 for s in signals[-10:]:
                     print(f"[{s['at'].strftime('%m-%d %H:%M')}] {s['type']} | {s['side'].upper()} | {s.get('note','')}")
                 latest = signals[-1]
+                # Xác định id duy nhất cho tín hiệu đảo chiều (dựa trên type, side, at)
                 signal_id = f"{latest['type']}_{latest['side']}_{latest['at']}"
 
-                # Chỉ xử lý khi tín hiệu mới
+                # Tính gợi ý SL/TP cho MACD Cross và RSI Divergence (dựa trên swing + EMA50/100)
+                sl_tp_text = ""
+                if latest['type'] in ("MACD Cross", "RSI Divergence"):
+                    try:
+                        h_idx, l_idx = last_two_swing_idx(dfp)
+                        ema50 = float(result.get('ema50', 0.0))
+                        ema100 = float(result.get('ema100', 0.0))
+                        if latest['side'] == 'bullish':
+                            sl = float(dfp.loc[l_idx[-1], 'low']) if l_idx else None
+                            tp_candidates = [v for v in (ema50, ema100) if v and v > 0]
+                            if h_idx:
+                                tp_candidates.append(float(dfp.loc[h_idx[-1], 'high']))
+                            tp = max(tp_candidates) if tp_candidates else None
+                        else:
+                            sl = float(dfp.loc[h_idx[-1], 'high']) if h_idx else None
+                            tp_candidates = [v for v in (ema50, ema100) if v and v > 0]
+                            if l_idx:
+                                tp_candidates.append(float(dfp.loc[l_idx[-1], 'low']))
+                            tp = min(tp_candidates) if tp_candidates else None
+                        sl_text = f"{sl:.2f}" if sl is not None else "N/A"
+                        tp_text = f"{tp:.2f}" if tp is not None else "N/A"
+                        sl_tp_text = f"\n<b>SL/TP:</b> SL: {sl_text} | TP: {tp_text}"
+                    except Exception:
+                        sl_tp_text = ""
+
                 if signal_id != last_signal_id:
-                    side = latest['side']  # 'bullish' hoặc 'bearish'
-                    entry, sl, tp, rr = compute_sl_tp(dfp, side)
-
-                    # MTF filter
-                    ok_15m, tag_15m = aligned_with_15m(side, result15['label'])
-                    mtf_ok = (not MTF_CONFIRM) or ok_15m
-
-                    # So ngưỡng R:R
-                    rr_ok = (rr is not None) and (rr >= MIN_RR_TO_SEND)
-
-                    # Soạn message
-                    header = f"<b>{SYMBOL} {INTERVAL}</b> — {latest['type']} ({side.upper()})"
-                    info3m = (
-                        f"Close: {result3['last_close']:.2f} | EMA50/100: "
-                        f"{result3['ema50']:.2f}/{result3['ema100']:.2f} | "
-                        f"RSI: {result3['rsi']:.2f} | Trend3m: {result3['label']}"
-                    )
-                    info15m = f"Trend15m: {result15['label']} ({tag_15m})"
-                    sltp = f"Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp)} | R:R = {fmt(rr,2)}"
-
-                    note_list = [latest.get('note',''), "MTF OK" if mtf_ok else "MTF FAIL"]
-                    if rr is None:
-                        note_list.append("R:R N/A")
-                    elif rr_ok:
-                        note_list.append(f"R:R OK (≥ {MIN_RR_TO_SEND})")
+                    if result['label'] == "UPTREND":
+                        trend_action = "LONG"
+                    elif result['label'] == "DOWNTREND":
+                        trend_action = "SHORT"
                     else:
-                        note_list.append(f"R:R FAIL (< {MIN_RR_TO_SEND})")
-
+                        trend_action = "NO CLEAR DIRECTION"
                     msg = (
-                        f"{header}\n{info3m}\n{info15m}\n{sltp}\n"
-                        f"Note: " + " | ".join([n for n in note_list if n])
+                        f"<b>BTC 3m Signal</b>\n"
+                        f"Time: {latest['at'].strftime('%Y-%m-%d %H:%M')}\n"
+                        f"Type: <b>{latest['type']}</b>\n"
+                        f"Side: <b>{latest['side'].upper()}</b>\n"
+                        f"Note: {latest.get('note','')}\n"
+                        f"Close: {result['last_close']:.2f} | EMA50: {result['ema50']:.2f} | EMA100: {result['ema100']:.2f}\n"
+                        f"RSI: {result['rsi']:.2f} | MACD: {result['macd_line']:.4f}\n"
+                        f"<b>Kết luận: {trend_action}</b>" + sl_tp_text
                     )
-
-                    # In ra console
-                    print(msg)
-
-                    # Gửi Telegram khi thỏa điều kiện
-                    if mtf_ok and rr_ok:
-                        send_telegram_message(msg)
-                        if SEND_IMAGES:
-                            send_telegram_photo(SAVE_PRICE_PNG, "Price 3m")
-                            send_telegram_photo(SAVE_PRICE_15M_PNG, "Price 15m")
-                        last_signal_id = signal_id
-                    else:
-                        # Dù không gửi, vẫn set last_signal_id để tránh spam
-                        last_signal_id = signal_id
-
-            time.sleep(LOOP_SLEEP_SECONDS)
-
+                    send_telegram_message(msg)
+                    # gửi cả ảnh 3m và 15m để tham khảo
+                    send_telegram_photo(SAVE_PRICE_PNG)
+                    try:
+                        send_telegram_photo(SAVE_PRICE_15M_PNG)
+                    except Exception:
+                        pass
+                    last_signal_id = signal_id
+            # Chờ 60 giây trước khi lặp lại
+            time.sleep(60)
         except Exception as e:
-            print(f"[ERROR] {e}")
-            time.sleep(10)
+            print(f"Error: {e}")
+            time.sleep(60)
 
-# ============== Entry ==============
 if __name__ == "__main__":
-    send_telegram_photo('start_server.png', "Start server detector ....")
     main()
+if __name__ == "__main__":
+    main()
+
+# requirements for pip install:
+# pandas
+# numpy
+# matplotlib
+# requests
+# pytz
+

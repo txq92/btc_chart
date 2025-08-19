@@ -21,13 +21,20 @@ import time
 from typing import Tuple, List, Dict, Optional
 
 # ============== CONFIG ==============
-SYMBOL = "BTCUSDT"
+SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SUIUSDT",
+    "SOLUSDT"
+]
 INTERVAL = "3m"
 LIMIT = 120
-SAVE_PRICE_PNG = "btc_3m_price.png"
-SAVE_PRICE_15M_PNG = "btc_15m_price.png"
-SAVE_RSI_PNG   = "btc_3m_rsi.png"
-SAVE_MACD_PNG  = "btc_3m_macd.png"
+
+def get_save_paths(symbol: str) -> dict:
+    return {
+        "price_3m": f"{symbol.lower()}_3m_price.png",
+        "price_15m": f"{symbol.lower()}_15m_price.png"
+    }
 BASE = "https://api.binance.com"
 TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
@@ -36,11 +43,17 @@ TELEGRAM_BOT_TOKEN = "8226246719:AAHXDggFiFYpsgcq1vwTAWv7Gsz1URP4KEU"
 #TELEGRAM_CHAT_ID = "-4706073326"
 TELEGRAM_CHAT_ID = "-4967023521"
 
+# API Configs
+API_TIMEOUT = 20               # Timeout cho API calls (giây)
+TELEGRAM_TIMEOUT = 10         # Timeout cho Telegram API (giây)
+RETRY_DELAY = 10             # Thời gian chờ giữa các lần retry khi lỗi (giây)
+SYMBOL_DELAY = 1             # Delay giữa các lần fetch data cho mỗi coin (giây)
+
 # Tham số vận hành
 LOOP_SLEEP_SECONDS = 15         # nghỉ giữa mỗi vòng lặp
 SEND_IMAGES = True              # gửi ảnh kèm tín hiệu
 MTF_CONFIRM = True              # confirm theo trend 15m
-MIN_RR_TO_SEND = 1.0            # chỉ gửi khi R:R >= ngưỡng (có thể đặt 1.2/1.5 tùy khẩu vị)
+MIN_RR_TO_SEND = 1.0           # chỉ gửi khi R:R >= ngưỡng (có thể đặt 1.2/1.5 tùy khẩu vị)
 
 # ================= Indicators =================
 def ema(series: pd.Series, length: int) -> pd.Series:
@@ -82,22 +95,36 @@ def last_two_swing_idx(df: pd.DataFrame):
     return h_idx[-2:], l_idx[-2:]
 
 # ================= Fetch =================
-def get_klines(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT) -> pd.DataFrame:
-    url = f"{BASE}/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    cols = ["open_time","open","high","low","close","volume",
-            "close_time","qav","trades","taker_base","taker_quote","ignore"]
-    df = pd.DataFrame(data, columns=cols)
-    for c in ["open","high","low","close","volume"]:
-        df[c] = df[c].astype(float)
-    df["open_time"]  = pd.to_datetime(df["open_time"], unit="ms", utc=True).dt.tz_convert(TZ)
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True).dt.tz_convert(TZ)
-    return df[["open_time","open","high","low","close","volume","close_time"]]
+def get_klines(symbol: str, interval=INTERVAL, limit=LIMIT) -> pd.DataFrame:
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            url = f"{BASE}/api/v3/klines"
+            params = {"symbol": symbol, "interval": interval, "limit": limit}
+            r = requests.get(url, params=params, timeout=API_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            
+            cols = ["open_time","open","high","low","close","volume",
+                   "close_time","qav","trades","taker_base","taker_quote","ignore"]
+            df = pd.DataFrame(data, columns=cols)
+            
+            for c in ["open","high","low","close","volume"]:
+                df[c] = df[c].astype(float)
+                
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True).dt.tz_convert(TZ)
+            df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True).dt.tz_convert(TZ)
+            
+            return df[["open_time","open","high","low","close","volume","close_time"]]
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching klines for {symbol} (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
 
-def get_klines_15m(symbol=SYMBOL, limit=120) -> pd.DataFrame:
+def get_klines_15m(symbol: str, limit=120) -> pd.DataFrame:
     return get_klines(symbol=symbol, interval="15m", limit=limit)
 
 # ================= Trend Score =================
@@ -246,19 +273,13 @@ def collect_reversal_signals(df: pd.DataFrame) -> List[Dict]:
     return sorted(sig, key=lambda s: s["at"])
 
 # ================= Plotting (+ markers) =================
-def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str, interval: str = "3m"):
+def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str, interval: str = "3m", symbol: str = "BTCUSDT"):
     plt.figure()
-    plt.plot(df["open_time"], df["close"], linewidth=1.3, label="Close")
+    plt.plot(df["open_time"], df["close"], linewidth=1.0, label="Close")
     plt.plot(df["open_time"], df["ema50"], linewidth=1.0, label="EMA50")
     plt.plot(df["open_time"], df["ema100"], linewidth=1.0, label="EMA100")
 
-    # Swings
-    sw = df[df["swing_high"] | df["swing_low"]]
-    if not sw.empty:
-        plt.scatter(sw["open_time"], sw["high"], s=15)
-        plt.scatter(sw["open_time"], sw["low"], s=15)
-
-    # Markers for signals on price chart
+    # Vẽ các tín hiệu
     for s in signals:
         t = s["at"]
         if s["type"] in ("EMA Cross","Engulfing"):
@@ -282,7 +303,7 @@ def plot_price(df: pd.DataFrame, signals: List[Dict], save_path: str, interval: 
                 plt.scatter([xs[-1]],[ys[-1]], marker=m, s=60)
                 plt.annotate("Div", (xs[-1],ys[-1]), xytext=(6,10), textcoords="offset points", fontsize=8)
 
-    plt.title(f"{SYMBOL} – {interval} Price with EMA50/EMA100 (+Signals)")
+    plt.title(f"{symbol} – {interval} Price with EMA50/EMA100 (+Signals)")
     plt.xlabel("Time (Asia/Ho_Chi_Minh)"); plt.ylabel("Price")
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=TZ))
     plt.legend(); plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
@@ -324,21 +345,59 @@ def plot_macd(df: pd.DataFrame, signals: List[Dict], save_path: str):
     plt.legend(); plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
 
 # ================= Messaging =================
-def send_telegram_message(text: str):
+def send_telegram_message(message: str, max_retries: int = 3) -> bool:
     if not TELEGRAM_BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN" in TELEGRAM_BOT_TOKEN:
-        print("[WARN] Chưa cấu hình TELEGRAM_BOT_TOKEN.")
-        return
+        return False
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
+        "text": message,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True
+        "disable_notification": True
     }
-    try:
-        requests.post(url, data=payload, timeout=10)
-    except Exception as e:
-        print(f"Telegram send error: {e}")
+    
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(url, data=payload, timeout=TELEGRAM_TIMEOUT)
+            r.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            print(f"Telegram send error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(RETRY_DELAY)
+    
+    return False
+
+def send_telegram_photo(photo_path: str, caption: str = "", max_retries: int = 3) -> bool:
+    if not TELEGRAM_BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN" in TELEGRAM_BOT_TOKEN:
+        return False
+        
+    if not os.path.exists(photo_path):
+        print(f"Photo file not found: {photo_path}")
+        return False
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    
+    for attempt in range(max_retries):
+        try:
+            with open(photo_path, "rb") as photo:
+                files = {"photo": photo}
+                data = {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "disable_notification": True
+                }
+                r = requests.post(url, data=data, files=files, timeout=TELEGRAM_TIMEOUT)
+                r.raise_for_status()
+                return True
+        except (requests.exceptions.RequestException, IOError) as e:
+            print(f"Telegram photo send error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(RETRY_DELAY)
+    
+    return False
 
 def send_telegram_photo(photo_path: str, caption: str = ""):
     if not TELEGRAM_BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN" in TELEGRAM_BOT_TOKEN:
@@ -397,31 +456,37 @@ def fmt(n: Optional[float], digits=2) -> str:
 
 # ================= Main =================
 def main():
-    last_signal_id = None  # để chống gửi trùng
+    last_signal_ids = {symbol: None for symbol in SYMBOLS}
+    first_run = True
+    error_counts = {symbol: 0 for symbol in SYMBOLS}
+    
     while True:
         try:
-            # ===== 3m =====
-            df = get_klines()
-            df["ema50"]  = ema(df["close"], 50)
-            df["ema100"] = ema(df["close"], 100)
-            df["rsi"]    = rsi(df["close"], 14)
-            macd_line, macd_signal, macd_hist = macd(df["close"], 12, 26, 9)
-            df["macd_line"] = macd_line; df["macd_signal"] = macd_signal; df["macd_hist"] = macd_hist
-            df["vol_ma20"] = df["volume"].rolling(20).mean()
-            df = swing_points(df, window=3)
-            dfp = df.tail(120).copy()
+            for symbol in SYMBOLS:
+                save_paths = get_save_paths(symbol)
+                
+                # ===== 3m =====
+                df = get_klines(symbol=symbol)
+                df["ema50"] = ema(df["close"], 50)
+                df["ema100"] = ema(df["close"], 100)
+                df["rsi"] = rsi(df["close"], 14)
+                macd_line, macd_signal, macd_hist = macd(df["close"], 12, 26, 9)
+                df["macd_line"] = macd_line
+                df["macd_signal"] = macd_signal
+                df["macd_hist"] = macd_hist
+                df["vol_ma20"] = df["volume"].rolling(20).mean()
+                df = swing_points(df, window=3)
+                dfp = df.tail(120).copy()
 
-            result3 = score_trend(dfp)
-            signals = collect_reversal_signals(dfp)
+                result3 = score_trend(dfp)
+                signals = collect_reversal_signals(dfp)
 
-            plot_price(dfp, signals, SAVE_PRICE_PNG, interval="3m")
-            plot_rsi(dfp, signals, SAVE_RSI_PNG)
-            plot_macd(dfp, signals, SAVE_MACD_PNG)
+                plot_price(dfp, signals, save_paths["price_3m"], interval="3m", symbol=symbol)
 
-            # ===== 15m =====
-            df15 = get_klines_15m()
-            df15["ema50"]  = ema(df15["close"], 50)
-            df15["ema100"] = ema(df15["close"], 100)
+                # ===== 15m =====
+                df15 = get_klines_15m(symbol=symbol)
+                df15["ema50"] = ema(df15["close"], 50)
+                df15["ema100"] = ema(df15["close"], 100)
             df15["rsi"]    = rsi(df15["close"], 14)
             macd_line15, macd_signal15, macd_hist15 = macd(df15["close"], 12, 26, 9)
             df15["macd_line"] = macd_line15; df15["macd_signal"] = macd_signal15; df15["macd_hist"] = macd_hist15
@@ -431,19 +496,17 @@ def main():
             result15 = score_trend(dfp15)
 
             # ===== Console log =====
-            print("=== BTC Trend Detector ===")
+            print(f"=== {symbol} Trend Detector ===")
             print(f"Time: {result3['last_time'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
             print(f"3m Close: {result3['last_close']:.2f} | EMA50: {result3['ema50']:.2f} | EMA100: {result3['ema100']:.2f}")
-            print(f"3m RSI(14): {result3['rsi']:.2f}")
-            print(f"3m MACD: line {result3['macd_line']:.4f} | signal {result3['macd_signal']:.4f} | hist {result3['macd_hist']:.4f}")
             print(f"3m Volume: {result3['volume']:.0f} | VolMA20: {result3['vol_ma20']:.0f}")
             print(f"3m Score: {result3['score']}  =>  Trend: {result3['label']}")
             print(f"15m Trend: {result15['label']}")
-            print(f"Saved: {SAVE_PRICE_PNG}, {SAVE_RSI_PNG}, {SAVE_MACD_PNG}, {SAVE_PRICE_15M_PNG}\n")
+            print(f"Saved: {save_paths['price_3m']}, {save_paths['price_15m']}\n")
 
             # Vẽ 15m cuối cùng sau khi có result15
             signals15 = collect_reversal_signals(dfp15)
-            plot_price(dfp15, signals15, SAVE_PRICE_15M_PNG, interval="15m")
+            plot_price(dfp15, signals15, save_paths["price_15m"], interval="15m", symbol=symbol)
 
             # ===== Xử lý tín hiệu đảo chiều mới nhất =====
             print("--- Reversal signals (latest) ---")
@@ -456,7 +519,7 @@ def main():
                 signal_id = f"{latest['type']}_{latest['side']}_{latest['at']}"
 
                 # Chỉ xử lý khi tín hiệu mới
-                if signal_id != last_signal_id:
+                if signal_id != last_signal_ids[symbol]:
                     side = latest['side']  # 'bullish' hoặc 'bearish'
                     entry, sl, tp, rr = compute_sl_tp(dfp, side)
 
@@ -468,14 +531,18 @@ def main():
                     rr_ok = (rr is not None) and (rr >= MIN_RR_TO_SEND)
 
                     # Soạn message
-                    header = f"<b>{SYMBOL} {INTERVAL}</b> — {latest['type']} ({side.upper()})"
+                    signal_time = latest['at'].strftime('%Y-%m-%d %H:%M:%S')
+                    header = f"<b>{symbol} {INTERVAL}</b> — {latest['type']} ({side.upper()})"
+                    time_line = f"Signal Time: {signal_time}"
                     info3m = (
                         f"Close: {result3['last_close']:.2f} | EMA50/100: "
                         f"{result3['ema50']:.2f}/{result3['ema100']:.2f} | "
                         f"RSI: {result3['rsi']:.2f} | Trend3m: {result3['label']}"
                     )
                     info15m = f"Trend15m: {result15['label']} ({tag_15m})"
-                    sltp = f"Entry: {fmt(entry)} | SL: {fmt(sl)} | TP1: {fmt(tp)} | R:R = {fmt(rr,2)}"
+                    entry_rr = f"Entry: {fmt(entry)} | R:R = {fmt(rr,2)}"
+                    sl_line = f"SL: {fmt(sl)}"
+                    tp_line = f"TP1: {fmt(tp)}"
 
                     note_list = [latest.get('note',''), "MTF OK" if mtf_ok else "MTF FAIL"]
                     if rr is None:
@@ -486,29 +553,36 @@ def main():
                         note_list.append(f"R:R FAIL (< {MIN_RR_TO_SEND})")
 
                     msg = (
-                        f"{header}\n{info3m}\n{info15m}\n{sltp}\n"
+                        f"{header}\n{time_line}\n{info3m}\n{info15m}\n"
+                        f"{entry_rr}\n{sl_line}\n{tp_line}\n"
                         f"Note: " + " | ".join([n for n in note_list if n])
                     )
 
                     # In ra console
                     print(msg)
 
-                    # Gửi Telegram khi thỏa điều kiện
-                    if mtf_ok and rr_ok:
+                    # Gửi Telegram khi thỏa điều kiện hoặc khi là lần chạy đầu tiên
+                    should_send = mtf_ok and rr_ok
+                    if should_send and (first_run or signal_id != last_signal_ids[symbol]):
                         send_telegram_message(msg)
                         if SEND_IMAGES:
-                            send_telegram_photo(SAVE_PRICE_PNG, "Price 3m")
-                            send_telegram_photo(SAVE_PRICE_15M_PNG, "Price 15m")
-                        last_signal_id = signal_id
-                    else:
-                        # Dù không gửi, vẫn set last_signal_id để tránh spam
-                        last_signal_id = signal_id
+                            send_telegram_photo(save_paths["price_3m"], f"{symbol} Price 3m")
+                            send_telegram_photo(save_paths["price_15m"], f"{symbol} Price 15m")
+                        last_signal_ids[symbol] = signal_id
+                    elif not first_run:
+                        # Chỉ set last_signal_ids khi không phải lần chạy đầu
+                        last_signal_ids[symbol] = signal_id
 
+                time.sleep(SYMBOL_DELAY)
+                error_counts[symbol] = 0  # Reset error count nếu xử lý thành công
+
+            # Reset first_run sau khi đã xử lý tất cả các coin
+            first_run = False
             time.sleep(LOOP_SLEEP_SECONDS)
 
         except Exception as e:
-            print(f"[ERROR] {e}")
-            time.sleep(10)
+            print(f"[CRITICAL ERROR] {e}")
+            time.sleep(RETRY_DELAY)
 
 # ============== Entry ==============
 if __name__ == "__main__":

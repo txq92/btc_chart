@@ -35,7 +35,17 @@ SYMBOL_DELAY = 1             # Delay between fetching data for each coin (second
 LOOP_SLEEP_SECONDS = 15         # Sleep between main loops
 SEND_IMAGES = True              # Send images with signals
 MTF_CONFIRM = True              # Confirm according to 15m trend
-MIN_RR_TO_SEND = 1.0           # Only send when R:R >= threshold
+MIN_RR_TO_SEND = 1.5           # Only send when R:R >= threshold (increased from 1.0)
+
+# Enhanced R:R Configuration
+SYMBOL_SPECIFIC_RR = {
+    "BTCUSDT": {"min_rr": 1.2, "risk_percent": 1.0, "atr_sl_mult": 1.2, "atr_tp_mult": 2.5},
+    "ETHUSDT": {"min_rr": 1.5, "risk_percent": 0.8, "atr_sl_mult": 1.5, "atr_tp_mult": 3.0},
+    "SUIUSDT": {"min_rr": 1.8, "risk_percent": 0.5, "atr_sl_mult": 1.8, "atr_tp_mult": 3.5},
+    "SOLUSDT": {"min_rr": 1.8, "risk_percent": 0.5, "atr_sl_mult": 1.8, "atr_tp_mult": 3.5}
+}
+VOLUME_THRESHOLD = 1.2          # Volume ratio for confidence boost
+VOLATILITY_THRESHOLD = 2.0      # High volatility threshold
 
 # Telegram configuration
 TELEGRAM_BOT_TOKEN = "8226246719:AAHXDggFiFYpsgcq1vwTAWv7Gsz1URP4KEU"
@@ -75,6 +85,20 @@ def macd(series: pd.Series, fast=12, slow=26, signal=9):
     signal_line = ema(macd_line, signal)
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Average True Range for volatility measurement."""
+    high = df['high']
+    low = df['low']
+    close = df['close'].shift(1)
+    
+    tr1 = high - low
+    tr2 = abs(high - close)
+    tr3 = abs(low - close)
+    
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    return atr
 
 # ================= Swings =================
 def swing_points(df: pd.DataFrame, window: int = 3) -> pd.DataFrame:
@@ -406,29 +430,146 @@ def send_telegram_photo(photo_path: str, caption: str = "", max_retries: int = 3
     return False
 
 # ================= SL/TP & Helpers =================
-def compute_sl_tp(dfp: pd.DataFrame, side: str):
-    """Compute basic SL/TP based on nearest swing (TP1 = opposite swing)."""
-    h_idx, l_idx = last_two_swing_idx(dfp)
-    entry = float(dfp.iloc[-1]["close"])
-
-    sl = tp = None
-    if side == "bullish":
-        if l_idx: sl = float(dfp.loc[l_idx[-1], "low"])
-        if h_idx: tp = float(dfp.loc[h_idx[-1], "high"])
-    else:
-        if h_idx: sl = float(dfp.loc[h_idx[-1], "high"])
-        if l_idx: tp = float(dfp.loc[l_idx[-1], "low"])
-
-    rr = None
-    if sl is not None and tp is not None:
-        if side == "bullish" and entry > sl:
-            denom = (entry - sl)
-            rr = (tp - entry) / denom if denom > 0 else None
-        elif side == "bearish" and sl > entry:
-            denom = (sl - entry)
-            rr = (entry - tp) / denom if denom > 0 else None
-
-    return entry, sl, tp, rr
+def compute_sl_tp(dfp: pd.DataFrame, side: str, symbol: str = "BTCUSDT") -> dict:
+    """Enhanced SL/TP computation with ATR buffer and multiple TP levels."""
+    try:
+        # Get symbol-specific configuration
+        config = SYMBOL_SPECIFIC_RR.get(symbol, {
+            "min_rr": 1.5, "atr_sl_mult": 1.5, "atr_tp_mult": 3.0
+        })
+        
+        h_idx, l_idx = last_two_swing_idx(dfp)
+        entry = float(dfp.iloc[-1]["close"])
+        
+        # Calculate ATR for dynamic SL/TP
+        atr_series = calculate_atr(dfp)
+        current_atr = atr_series.iloc[-1] if not atr_series.isna().iloc[-1] else (entry * 0.02)
+        
+        sl = tp1 = tp2 = tp3 = None
+        strategy_used = "Enhanced_Swing_ATR"
+        confidence = 0.7
+        
+        if side == "bullish":
+            # Enhanced SL calculation with ATR buffer
+            if l_idx:
+                swing_low = float(dfp.loc[l_idx[-1], "low"])
+                atr_buffer = current_atr * 0.5  # ATR buffer
+                sl = swing_low - atr_buffer
+            else:
+                # Fallback to ATR-based SL
+                sl = entry - (current_atr * config["atr_sl_mult"])
+                strategy_used = "ATR_Based"
+                confidence = 0.6
+            
+            # Enhanced TP calculation - multiple levels
+            if h_idx:
+                swing_high = float(dfp.loc[h_idx[-1], "high"])
+                tp1 = swing_high  # Primary target at swing high
+                
+                # Calculate swing range for extensions
+                if l_idx:
+                    swing_range = swing_high - float(dfp.loc[l_idx[-1], "low"])
+                    tp2 = swing_high + (swing_range * 0.618)  # Fibonacci extension
+                    tp3 = swing_high + (swing_range * 1.0)    # 100% extension
+                else:
+                    tp2 = entry + (current_atr * config["atr_tp_mult"])
+                    tp3 = entry + (current_atr * config["atr_tp_mult"] * 1.5)
+            else:
+                # Fallback to ATR-based TP
+                tp1 = entry + (current_atr * config["atr_tp_mult"])
+                tp2 = entry + (current_atr * config["atr_tp_mult"] * 1.2)
+                tp3 = entry + (current_atr * config["atr_tp_mult"] * 1.5)
+                strategy_used = "ATR_Based"
+        
+        else:  # bearish
+            # Enhanced SL calculation with ATR buffer
+            if h_idx:
+                swing_high = float(dfp.loc[h_idx[-1], "high"])
+                atr_buffer = current_atr * 0.5
+                sl = swing_high + atr_buffer
+            else:
+                sl = entry + (current_atr * config["atr_sl_mult"])
+                strategy_used = "ATR_Based"
+                confidence = 0.6
+            
+            # Enhanced TP calculation - multiple levels
+            if l_idx:
+                swing_low = float(dfp.loc[l_idx[-1], "low"])
+                tp1 = swing_low
+                
+                if h_idx:
+                    swing_range = float(dfp.loc[h_idx[-1], "high"]) - swing_low
+                    tp2 = swing_low - (swing_range * 0.618)
+                    tp3 = swing_low - (swing_range * 1.0)
+                else:
+                    tp2 = entry - (current_atr * config["atr_tp_mult"])
+                    tp3 = entry - (current_atr * config["atr_tp_mult"] * 1.5)
+            else:
+                tp1 = entry - (current_atr * config["atr_tp_mult"])
+                tp2 = entry - (current_atr * config["atr_tp_mult"] * 1.2)
+                tp3 = entry - (current_atr * config["atr_tp_mult"] * 1.5)
+                strategy_used = "ATR_Based"
+        
+        # Calculate R:R ratio
+        rr = None
+        if sl is not None and tp1 is not None:
+            risk = abs(entry - sl)
+            reward = abs(tp1 - entry)
+            rr = reward / risk if risk > 0 else None
+        
+        # Volume and volatility analysis for confidence adjustment
+        volume_ratio = dfp.iloc[-1]["volume"] / dfp["volume"].tail(20).mean()
+        if volume_ratio > VOLUME_THRESHOLD:
+            confidence *= 1.1  # Boost confidence with high volume
+        elif volume_ratio < 0.8:
+            confidence *= 0.9  # Reduce confidence with low volume
+        
+        # Volatility adjustment
+        avg_atr = atr_series.tail(20).mean()
+        volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
+        if volatility_ratio > VOLATILITY_THRESHOLD:
+            confidence *= 0.8  # Reduce confidence in high volatility
+        
+        return {
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr": rr,
+            "strategy": strategy_used,
+            "confidence": confidence,
+            "atr": current_atr,
+            "volume_ratio": volume_ratio,
+            "volatility_ratio": volatility_ratio
+        }
+        
+    except Exception as e:
+        print(f"Error in enhanced SL/TP calculation: {e}")
+        # Fallback to simple calculation
+        h_idx, l_idx = last_two_swing_idx(dfp)
+        entry = float(dfp.iloc[-1]["close"])
+        
+        sl = tp1 = None
+        if side == "bullish":
+            if l_idx: sl = float(dfp.loc[l_idx[-1], "low"])
+            if h_idx: tp1 = float(dfp.loc[h_idx[-1], "high"])
+        else:
+            if h_idx: sl = float(dfp.loc[h_idx[-1], "high"])
+            if l_idx: tp1 = float(dfp.loc[l_idx[-1], "low"])
+        
+        rr = None
+        if sl is not None and tp1 is not None:
+            if side == "bullish" and entry > sl:
+                rr = (tp1 - entry) / (entry - sl)
+            elif side == "bearish" and sl > entry:
+                rr = (entry - tp1) / (sl - entry)
+        
+        return {
+            "entry": entry, "sl": sl, "tp1": tp1, "tp2": None, "tp3": None,
+            "rr": rr, "strategy": "Fallback_Simple", "confidence": 0.5,
+            "atr": None, "volume_ratio": 1.0, "volatility_ratio": 1.0
+        }
 
 def aligned_with_15m(side: str, label15: str) -> Tuple[bool, str]:
     """Determine alignment with 15m frame; return with descriptive tag."""
@@ -508,26 +649,66 @@ def process_symbol(symbol: str, first_run: bool, last_signal_ids: dict) -> Tuple
             
             if first_run or signal_id != last_signal_ids.get(symbol):
                 side = latest['side']
-                entry, sl, tp, rr = compute_sl_tp(dfp, side)
+                rr_data = compute_sl_tp(dfp, side, symbol)
+                
+                # Get symbol-specific minimum R:R
+                symbol_config = SYMBOL_SPECIFIC_RR.get(symbol, {"min_rr": 1.5})
+                symbol_min_rr = symbol_config["min_rr"]
                 
                 ok_15m, tag_15m = aligned_with_15m(side, result15['label'])
                 mtf_ok = (not MTF_CONFIRM) or ok_15m
-                rr_ok = (rr is not None) and (rr >= MIN_RR_TO_SEND)
+                rr_ok = (rr_data["rr"] is not None) and (rr_data["rr"] >= symbol_min_rr)
                 
-                if mtf_ok and rr_ok:
+                # Additional quality filters
+                confidence_ok = rr_data["confidence"] >= 0.5
+                
+                print(f"📊 {symbol} Signal Check:")
+                rr_text = f"{rr_data['rr']:.2f}" if rr_data['rr'] is not None else "N/A"
+                print(f"   R:R: {rr_text} (min: {symbol_min_rr})")
+                print(f"   15m: {ok_15m} | Confidence: {rr_data['confidence']:.2f}")
+                print(f"   Volume: {rr_data['volume_ratio']:.2f}x | Volatility: {rr_data['volatility_ratio']:.2f}x")
+                
+                if mtf_ok and rr_ok and confidence_ok:
                     signal_time = latest['at'].strftime('%Y-%m-%d %H:%M:%S')
                     
+                    # Build TP levels text
+                    tp_text = f"🟢 TP1: {fmt(rr_data['tp1'])}"
+                    if rr_data['tp2']:
+                        tp_text += f" | TP2: {fmt(rr_data['tp2'])}"
+                    if rr_data['tp3']:
+                        tp_text += f" | TP3: {fmt(rr_data['tp3'])}"
+                    
+                    # Market condition indicators
+                    market_indicators = []
+                    if rr_data['volume_ratio'] > VOLUME_THRESHOLD:
+                        market_indicators.append("🔥 High Volume")
+                    elif rr_data['volume_ratio'] < 0.8:
+                        market_indicators.append("⚠️ Low Volume")
+                    
+                    if rr_data['volatility_ratio'] > VOLATILITY_THRESHOLD:
+                        market_indicators.append("📈 High Volatility")
+                    
+                    market_text = " | ".join(market_indicators) if market_indicators else "📊 Normal Conditions"
+                    
                     msg_parts = [
-                        f"<b>{symbol} {INTERVAL}</b> — {latest['type']} ({side.upper()})",
-                        f"Signal Time: {signal_time}",
-                        f"Close: {result3['last_close']:.2f} | EMA50/100: {result3['ema50']:.2f}/{result3['ema100']:.2f} | RSI: {result3['rsi']:.2f} | Trend3m: {result3['label']}",
-                        f"Trend15m: {result15['label']} ({tag_15m})",
-                        f"Entry: {fmt(entry)} | R:R = {fmt(rr,2)}",
-                        f"SL: {fmt(sl)}",
-                        f"TP1: {fmt(tp)}"
+                        f"<b>🚨 {symbol} {INTERVAL}</b> — {latest['type']} ({side.upper()})",
+                        f"⏰ Time: {signal_time}",
+                        f"💰 Entry: {fmt(rr_data['entry'])} | 🔴 SL: {fmt(rr_data['sl'])}",
+                        tp_text,
+                        f"📊 R:R: <b>{fmt(rr_data['rr'], 2)}</b> | Strategy: {rr_data['strategy']}",
+                        f"📈 Trend 3m: {result3['label']} | 15m: {result15['label']} ({tag_15m})",
+                        f"🎯 Confidence: {rr_data['confidence']:.1%} | {market_text}",
+                        f"📋 Close: {result3['last_close']:.2f} | EMA: {result3['ema50']:.2f}/{result3['ema100']:.2f} | RSI: {result3['rsi']:.1f}"
                     ]
                     
+                    # Add ATR info if available
+                    if rr_data['atr']:
+                        atr_percent = (rr_data['atr'] / rr_data['entry']) * 100
+                        msg_parts.append(f"📊 ATR: {rr_data['atr']:.4f} ({atr_percent:.2f}%)")
+                    
                     msg = "\n".join(msg_parts)
+                    
+                    print(f"✅ {symbol}: Sending signal (R:R={rr_data['rr']:.2f}, Confidence={rr_data['confidence']:.2f})")
                     
                     send_telegram_message(msg)
                     if SEND_IMAGES:
@@ -535,6 +716,15 @@ def process_symbol(symbol: str, first_run: bool, last_signal_ids: dict) -> Tuple
                         send_telegram_photo(save_paths["price_15m"], f"{symbol} Price 15m")
                     
                     last_signal_ids[symbol] = signal_id
+                else:
+                    filter_reasons = []
+                    if not rr_ok: 
+                        rr_text = f"{rr_data['rr']:.2f}" if rr_data['rr'] is not None else "N/A"
+                        filter_reasons.append(f"R:R {rr_text} < {symbol_min_rr}")
+                    if not mtf_ok: filter_reasons.append("15m misalignment")
+                    if not confidence_ok: filter_reasons.append(f"Low confidence {rr_data['confidence']:.2f}")
+                    
+                    print(f"❌ {symbol}: Signal filtered - {', '.join(filter_reasons)}")
         
         return True, "Success"
     except Exception as e:
